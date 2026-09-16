@@ -32,6 +32,7 @@ import cleaning as cl  # noqa: E402
 import data_loading as dl  # noqa: E402
 import eda  # noqa: E402
 import geo_utils as gu  # noqa: E402
+import series_temporales as serie_mod  # noqa: E402
 
 st.set_page_config(page_title="Pozos - Raigón / Guaraní", page_icon="💧", layout="wide")
 sns.set_theme(style="whitegrid", context="notebook")
@@ -71,8 +72,14 @@ def cargar_datos():
     }
 
 
+@st.cache_data
+def cargar_serie_temporal_niveles():
+    return serie_mod.construir_serie_temporal_niveles()
+
+
 datos = cargar_datos()
 pozos = datos["pozos"]
+serie_niveles = cargar_serie_temporal_niveles()
 
 # ---------------------------------------------------------------------------
 # Sidebar: apariencia + filtros
@@ -406,7 +413,81 @@ st.dataframe(eda.cobertura_por_acuifero_y_fuente(pozos_f, "tiene_hidroquimica"),
 st.markdown("---")
 
 # ---------------------------------------------------------------------------
-# Sección 6 — Datos
+# Sección 6 — Series temporales de niveles
+# ---------------------------------------------------------------------------
+st.header("📈 Series Temporales de Niveles de Agua")
+
+cod_uk_con_serie = set(serie_niveles["Cod UK"].unique())
+pozos_con_serie = pozos_f[
+    pozos_f["Cod UK"].isin(cod_uk_con_serie) & pozos_f["lat"].notna() & pozos_f["lon"].notna()
+]
+
+if pozos_con_serie.empty:
+    st.info("No hay pozos con serie histórica de niveles para el filtro seleccionado.")
+else:
+    opciones_pozo = sorted(pozos_con_serie["Cod UK"].unique().tolist())
+    pozo_sel = st.selectbox("Elegí un pozo para ver su serie temporal", options=opciones_pozo)
+
+    mapa_serie = pozos_con_serie.rename(
+        columns={"Cod UK": "cod_uk", "acuifero": "acuifero_pozo", "Fuente BD": "fuente_bd"}
+    ).copy()
+    mapa_serie["es_seleccionado"] = mapa_serie["cod_uk"] == pozo_sel
+    mapa_serie["color"] = mapa_serie["es_seleccionado"].apply(
+        lambda sel: [230, 25, 25, 255] if sel else [120, 120, 120, 140]
+    )
+    mapa_serie["radio"] = mapa_serie["es_seleccionado"].apply(lambda sel: 1800 if sel else 700)
+    fila_sel = mapa_serie[mapa_serie["es_seleccionado"]].iloc[0]
+
+    col_mapa, col_serie = st.columns([1, 1.3])
+
+    with col_mapa:
+        st.markdown("**Ubicación de pozos con serie histórica**")
+        capa_serie = pdk.Layer(
+            "ScatterplotLayer", data=mapa_serie,
+            get_position=["lon", "lat"], get_fill_color="color",
+            get_line_color=[0, 0, 0], line_width_min_pixels=1,
+            stroked=True, get_radius="radio", pickable=True, auto_highlight=True,
+        )
+        st.pydeck_chart(pdk.Deck(
+            layers=[capa_serie],
+            initial_view_state=pdk.ViewState(
+                latitude=float(fila_sel["lat"]), longitude=float(fila_sel["lon"]), zoom=9,
+            ),
+            map_style=MAPA_ESTILO,
+            tooltip={"text": "Pozo: {cod_uk}\nAcuífero: {acuifero_pozo}\nFuente BD: {fuente_bd}"},
+        ))
+        st.caption("🔴 Pozo seleccionado. ⚪ Resto de los pozos con serie histórica (filtro actual).")
+
+    with col_serie:
+        st.markdown(f"**Serie de niveles — {pozo_sel}**")
+        serie_pozo = serie_niveles[serie_niveles["Cod UK"] == pozo_sel].sort_values("fecha")
+        fig, ax = plt.subplots(figsize=(7, 4.6))
+        color_pozo = COLOR_ACUIFERO.get(fila_sel["acuifero_pozo"], "#377eb8")
+        ax.plot(
+            serie_pozo["fecha"], serie_pozo["nivel"], marker="o", markersize=4,
+            linewidth=1.3, color=color_pozo,
+        )
+        ax.set_title(f"Nivel de agua registrado — {pozo_sel}", fontweight="bold")
+        ax.set_xlabel("Fecha")
+        ax.set_ylabel("Nivel")
+        fig.autofmt_xdate()
+        _estilizar_ejes(ax)
+        plt.tight_layout()
+        st.pyplot(fig)
+        st.caption(
+            f"{len(serie_pozo)} mediciones entre {serie_pozo['fecha'].min():%m/%Y} y "
+            f"{serie_pozo['fecha'].max():%m/%Y}. Unidad de nivel según fuente original del dato."
+        )
+
+    with st.expander("Ver tabla de la serie seleccionada"):
+        st.dataframe(
+            serie_pozo.rename(columns={"fecha": "Fecha", "nivel": "Nivel"}), use_container_width=True
+        )
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# Sección 7 — Datos
 # ---------------------------------------------------------------------------
 st.header("📄 Datos")
 
