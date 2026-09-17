@@ -32,6 +32,7 @@ import cleaning as cl  # noqa: E402
 import data_loading as dl  # noqa: E402
 import eda  # noqa: E402
 import geo_utils as gu  # noqa: E402
+import piper as piper_mod  # noqa: E402
 import series_temporales as serie_mod  # noqa: E402
 
 st.set_page_config(page_title="Pozos - Raigón / Guaraní", page_icon="💧", layout="wide")
@@ -217,8 +218,8 @@ st.markdown(
 )
 st.markdown("---")
 
-tab_resumen, tab_litologia, tab_hidroquimica = st.tabs(
-    ["📋 Resumen general", "🪨 Litología interactiva", "🧪 Hidroquímica interactiva"]
+tab_resumen, tab_litologia, tab_hidroquimica, tab_piper = st.tabs(
+    ["📋 Resumen general", "🪨 Litología interactiva", "🧪 Hidroquímica interactiva", "💠 Piper"]
 )
 
 with tab_resumen:
@@ -673,3 +674,57 @@ with tab_hidroquimica:
 
     with st.expander("Ver tabla cruda de Hidroquímica"):
         st.dataframe(_para_mostrar(hidroquimica_cruda), use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Tab 4 — Diagrama de Piper (clasificación hidroquímica)
+# ---------------------------------------------------------------------------
+with tab_piper:
+    st.header("💠 Diagrama de Piper — Clasificación hidroquímica")
+
+    piper_datos = piper_mod.agregar_coordenadas(piper_mod.calcular_porcentajes_piper(datos["hidroquimica"]))
+    n_muestras = len(piper_datos)
+    n_pozos_piper = piper_datos["Cod UK"].nunique()
+
+    st.markdown(
+        "Solo entran las muestras que tienen los 7 iones principales medidos en la misma "
+        "toma (Ca²⁺, Mg²⁺, Na⁺, K⁺, Cl⁻, SO₄²⁻ y HCO₃⁻). Actualmente eso se cumple para "
+        f"**{n_pozos_piper} pozos** ({n_muestras} muestras) de toda la base de hidroquímica."
+    )
+
+    if piper_datos.empty:
+        st.info("No hay muestras con el set completo de iones principales.")
+    else:
+        piper_datos = piper_datos.merge(pozos[["Cod UK", "acuifero"]], on="Cod UK", how="left")
+        piper_datos["acuifero"] = piper_datos["acuifero"].fillna("Sin clasificar")
+        piper_datos = piper_datos[piper_datos["acuifero"].isin(acuifero_sel)]
+
+        if piper_datos.empty:
+            st.info("No hay muestras con set iónico completo para el/los acuífero(s) seleccionado(s) en el filtro.")
+        else:
+            fig, ax = plt.subplots(figsize=(9, 7))
+            piper_mod.dibujar_esqueleto(ax)
+            for acuifero_nombre, grupo in piper_datos.groupby("acuifero"):
+                color = COLOR_ACUIFERO.get(acuifero_nombre, "#999999")
+                ax.scatter(grupo["x_cationes"], grupo["y_cationes"], color=color,
+                           edgecolor="black", s=45, zorder=5, label=acuifero_nombre)
+                ax.scatter(grupo["x_aniones"], grupo["y_aniones"], color=color,
+                           edgecolor="black", s=45, zorder=5)
+                ax.scatter(grupo["x_diamante"], grupo["y_diamante"], color=color,
+                           edgecolor="black", s=45, zorder=5)
+            ax.legend(title="Acuífero", loc="upper right", fontsize=9, frameon=False)
+            plt.tight_layout()
+            st.pyplot(fig)
+            st.caption(
+                "Cada pozo aparece 3 veces (triángulo de cationes, triángulo de aniones y "
+                "rombo central), siempre con el mismo color según su acuífero."
+            )
+
+            with st.expander("Ver tabla de porcentajes iónicos (meq%) de estas muestras"):
+                columnas_tabla = [
+                    "Cod UK", "Fecha", "acuifero", "pct_Ca", "pct_Mg", "pct_NaK",
+                    "pct_HCO3", "pct_SO4", "pct_Cl",
+                ]
+                tabla_piper = piper_datos[columnas_tabla].copy()
+                for col in ["pct_Ca", "pct_Mg", "pct_NaK", "pct_HCO3", "pct_SO4", "pct_Cl"]:
+                    tabla_piper[col] = tabla_piper[col].round(1)
+                st.dataframe(_para_mostrar(tabla_piper), use_container_width=True)
