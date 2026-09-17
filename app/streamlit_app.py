@@ -81,6 +81,17 @@ datos = cargar_datos()
 pozos = datos["pozos"]
 serie_niveles = cargar_serie_temporal_niveles()
 
+# Última lectura hidráulica (NE, ND, Caudal) por pozo — se usa tanto en la
+# ficha de Litología interactiva como en la pestaña de Hidráulica.
+hidraulica_cruda = datos["hidraulica"].copy()
+hidraulica_cruda["NE_m"] = pd.to_numeric(hidraulica_cruda["NE_m"], errors="coerce")
+hidraulica_cruda["ND-m"] = pd.to_numeric(hidraulica_cruda["ND-m"], errors="coerce")
+hidraulica_ultima = (
+    hidraulica_cruda.sort_values("Año", ascending=False)
+    .groupby("Cod UK", as_index=False)
+    .first()
+)
+
 # ---------------------------------------------------------------------------
 # Sidebar: apariencia + filtros
 # ---------------------------------------------------------------------------
@@ -97,6 +108,12 @@ acuifero_sel = st.sidebar.multiselect(
 fuentes_disponibles = sorted(pozos["Fuente BD"].dropna().unique().tolist())
 fuentes_sel = st.sidebar.multiselect("Fuente BD", options=fuentes_disponibles, default=fuentes_disponibles)
 
+_departamento_serie = pozos["Departamento"].fillna("Sin dato")
+departamentos_disponibles = sorted(_departamento_serie.unique().tolist())
+departamento_sel = st.sidebar.multiselect(
+    "Departamento", options=departamentos_disponibles, default=departamentos_disponibles
+)
+
 st.sidebar.markdown("**Con datos relevados en:**")
 solo_litologia = st.sidebar.checkbox("Litología")
 solo_hidroquimica = st.sidebar.checkbox("Hidroquímica")
@@ -109,7 +126,11 @@ st.sidebar.markdown(
     "— Ministerio de Ambiente, Uruguay"
 )
 
-pozos_f = pozos[pozos["acuifero"].isin(acuifero_sel) & pozos["Fuente BD"].isin(fuentes_sel)]
+pozos_f = pozos[
+    pozos["acuifero"].isin(acuifero_sel)
+    & pozos["Fuente BD"].isin(fuentes_sel)
+    & _departamento_serie.isin(departamento_sel)
+]
 if solo_litologia:
     pozos_f = pozos_f[pozos_f["tiene_litologia"]]
 if solo_hidroquimica:
@@ -153,12 +174,46 @@ else:
 _CICLO_MPL = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 COLOR_ACUIFERO = {"Raigón": _CICLO_MPL[1], "Guaraní": _CICLO_MPL[9], "Sin clasificar": _CICLO_MPL[7]}
 
-# Paleta ColorBrewer "Set1" (cualitativa), una entrada por Fuente BD. Se usa
-# tanto en el mapa como en el gráfico de cobertura, para que el color de
-# cada fuente sea siempre el mismo en toda la app.
-SET1 = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#ffff33", "#a65628", "#f781bf", "#999999"]
-FUENTES_ORDEN = ["Dinagua", "Dinamige", "OSE", "Privado", "MEVIR", "Academia", "Ancap", "Sin dato"]
-COLOR_FUENTE = {fuente: SET1[i % len(SET1)] for i, fuente in enumerate(FUENTES_ORDEN)}
+# Paleta institucional armonizada (tonos categóricos estilo Tableau/ColorBrewer),
+# una entrada fija por Fuente BD. Se usa tanto en el mapa como en los gráficos
+# de cobertura, para que el color de cada fuente sea siempre el mismo en toda
+# la app.
+COLOR_FUENTE = {
+    "Dinagua": "#0284C7",   # Azul oceánico — público / agua
+    "OSE": "#0D9488",       # Verde azulado / teal — servicios / agua potable
+    "Ancap": "#D97706",     # Ámbar / naranja — energía / industria
+    "Dinamige": "#4F46E5",  # Índigo — minería / geología
+    "MEVIR": "#059669",     # Verde esmeralda — vivienda / social
+    "Privado": "#8B5CF6",   # Púrpura suave
+    "Academia": "#DB2777",  # Rosa/frambuesa — investigación
+    "Sin dato": "#94A3B8",  # Gris neutro
+}
+
+# Paleta "geológica" de tonos tierra (ámbar, arena, gris pizarra y variaciones),
+# usada para colorear formaciones en la columna litológica — más apropiada
+# para un gráfico técnico de estratigrafía que una paleta cualitativa brillante.
+PALETA_GEOLOGICA = [
+    "#D97706", "#FBBF24", "#64748B", "#92400E", "#A16207", "#78716C",
+    "#B45309", "#CA8A04", "#57534E", "#EA580C", "#854D0E", "#A8A29E",
+    "#7C2D12", "#D6D3D1", "#451A03",
+]
+
+# Límites de referencia para agua de consumo (Decreto 253/79 y normativa UNIT
+# vigente en Uruguay). Solo se marcan los parámetros con un límite simple y
+# bien definido; "pH" se trata aparte por tener rango (mín/máx), no un único
+# umbral. Claves = nombre EXACTO de columna en la hoja de Hidroquímica.
+UMBRALES_NORMATIVOS = {
+    "As (ug/L)": 10.0,
+    "As disuelto(ug/L)": 10.0,
+    "F- (mg F-/L)": 1.3,
+    "Fe total (mg/L)": 0.3,
+    "Fe disuelto (mg/L)": 0.3,
+    "Mn (mg/L)": 0.1,
+    "Mn disuelto (mg/L)": 0.1,
+    "NO3 (mg/L)": 50.0,
+    "Conductividad electrica (microS/cm)": 2500.0,
+}
+UMBRAL_PH = (6.5, 8.5)
 
 
 def _hex_a_rgb(color_hex: str) -> list[int]:
@@ -248,29 +303,38 @@ with tab_resumen:
         st.warning("No hay pozos con coordenadas válidas para el filtro seleccionado.")
     else:
         con_coords["color"] = con_coords["Fuente BD"].apply(
-            lambda f: _hex_a_rgb(COLOR_FUENTE.get(f, "#999999")) + [200]
+            lambda f: _hex_a_rgb(COLOR_FUENTE.get(f, "#999999")) + [179]  # ~70% opacidad
         )
         mapa_df = con_coords.rename(columns={
             "Cod UK": "cod_uk", "Fuente BD": "fuente_bd", "acuifero": "acuifero_pozo",
         })[["lat", "lon", "color", "cod_uk", "acuifero_pozo", "fuente_bd", "tiene_litologia", "tiene_hidroquimica"]]
 
         fuentes_presentes = sorted(con_coords["Fuente BD"].dropna().unique().tolist())
-        st.markdown("**Leyenda — color por Fuente BD:**")
-        leyenda_html = "<div style='display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;'>"
+        chips_html = ""
         for fuente in fuentes_presentes:
             hex_c = COLOR_FUENTE.get(fuente, "#999999")
-            leyenda_html += (
-                f"<span style='background:{hex_c};color:white;border:1px solid black;"
-                f"padding:3px 10px;border-radius:12px;font-size:12px;'>{fuente}</span>"
+            chips_html += (
+                f"<span style='background:{hex_c};color:white;border:1px solid rgba(0,0,0,0.25);"
+                f"padding:4px 12px;border-radius:14px;font-size:12px;font-weight:600;'>{fuente}</span>"
             )
-        leyenda_html += "</div>"
+        fondo_tarjeta = "#161a23" if modo_oscuro else "#ffffff"
+        borde_tarjeta = "#2a2f3a" if modo_oscuro else "#e2e8f0"
+        color_texto_tarjeta = "#f0f2f6" if modo_oscuro else "#334155"
+        leyenda_html = (
+            f"<div style='background:{fondo_tarjeta};border:1px solid {borde_tarjeta};"
+            "border-radius:10px;padding:10px 14px;margin-bottom:12px;"
+            "box-shadow:0 1px 3px rgba(0,0,0,0.12);'>"
+            f"<div style='font-size:12px;font-weight:700;color:{color_texto_tarjeta};margin-bottom:6px;'>"
+            "Leyenda — color por Fuente BD</div>"
+            f"<div style='display:flex;flex-wrap:wrap;gap:8px;'>{chips_html}</div></div>"
+        )
         st.markdown(leyenda_html, unsafe_allow_html=True)
-        st.caption(f"📍 {len(mapa_df):,} pozos georreferenciados (puntos con borde negro, color = Fuente BD).")
+        st.caption(f"📍 {len(mapa_df):,} pozos georreferenciados (puntos con borde fino, color = Fuente BD).")
 
         capa = pdk.Layer(
             "ScatterplotLayer", data=mapa_df,
             get_position=["lon", "lat"], get_fill_color="color",
-            get_line_color=[0, 0, 0], line_width_min_pixels=1,
+            get_line_color=[0, 0, 0, 150], line_width_min_pixels=0.5,
             stroked=True, get_radius=800, pickable=True, auto_highlight=True,
         )
         st.pydeck_chart(pdk.Deck(
@@ -453,7 +517,7 @@ with tab_resumen:
             capa_serie = pdk.Layer(
                 "ScatterplotLayer", data=mapa_serie,
                 get_position=["lon", "lat"], get_fill_color="color",
-                get_line_color=[0, 0, 0], line_width_min_pixels=1,
+                get_line_color=[0, 0, 0, 180], line_width_min_pixels=0.6,
                 stroked=True, get_radius="radio", pickable=True, auto_highlight=True,
             )
             st.pydeck_chart(pdk.Deck(
@@ -550,6 +614,23 @@ with tab_litologia:
         mapa_lito["radio"] = mapa_lito["es_seleccionado"].apply(lambda sel: 1800 if sel else 700)
         fila_lito_sel = mapa_lito[mapa_lito["es_seleccionado"]].iloc[0]
 
+        _perfil_pozo_sel = litologia_valida[litologia_valida["Cod UK"] == pozo_lito_sel]
+        _prof_total = _perfil_pozo_sel["Fin"].max() if not _perfil_pozo_sel.empty else None
+        _hid_pozo_sel = hidraulica_ultima[hidraulica_ultima["Cod UK"] == pozo_lito_sel]
+        _ne_pozo_sel = _hid_pozo_sel["NE_m"].iloc[0] if not _hid_pozo_sel.empty else None
+        _caudal_pozo_sel = _hid_pozo_sel["Caudal"].iloc[0] if (
+            not _hid_pozo_sel.empty and "Caudal" in _hid_pozo_sel.columns
+        ) else None
+
+        with st.container(border=True):
+            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+            col_f1.metric("Profundidad total", f"{_prof_total:.1f} m" if pd.notna(_prof_total) else "Sin dato")
+            col_f2.metric("Nivel estático (NE)", f"{_ne_pozo_sel:.2f} m" if pd.notna(_ne_pozo_sel) else "Sin dato")
+            col_f3.metric("Acuífero captado", str(fila_lito_sel["acuifero_pozo"]))
+            col_f4.metric(
+                "Caudal", f"{_caudal_pozo_sel:.1f} m³/h" if pd.notna(_caudal_pozo_sel) else "Sin dato"
+            )
+
         col_mapa_lito, col_perfil = st.columns([1, 1.2])
 
         with col_mapa_lito:
@@ -557,7 +638,7 @@ with tab_litologia:
             capa_lito = pdk.Layer(
                 "ScatterplotLayer", data=mapa_lito,
                 get_position=["lon", "lat"], get_fill_color="color",
-                get_line_color=[0, 0, 0], line_width_min_pixels=1,
+                get_line_color=[0, 0, 0, 180], line_width_min_pixels=0.6,
                 stroked=True, get_radius="radio", pickable=True, auto_highlight=True,
             )
             st.pydeck_chart(pdk.Deck(
@@ -575,8 +656,9 @@ with tab_litologia:
             perfil = litologia_valida[litologia_valida["Cod UK"] == pozo_lito_sel].sort_values("Inicio")
 
             formaciones_todas = sorted(litologia_valida["Formacion"].dropna().unique().tolist())
-            cmap_formaciones = plt.get_cmap("tab20", max(len(formaciones_todas), 1))
-            color_formacion = {f: cmap_formaciones(i) for i, f in enumerate(formaciones_todas)}
+            color_formacion = {
+                f: PALETA_GEOLOGICA[i % len(PALETA_GEOLOGICA)] for i, f in enumerate(formaciones_todas)
+            }
 
             fig, ax = plt.subplots(figsize=(6, 6.5))
             formaciones_vistas = set()
@@ -649,7 +731,7 @@ with tab_hidroquimica:
         capa_hq = pdk.Layer(
             "ScatterplotLayer", data=mapa_hq,
             get_position=["lon", "lat"], get_fill_color="color",
-            get_line_color=[0, 0, 0], line_width_min_pixels=1,
+            get_line_color=[0, 0, 0, 180], line_width_min_pixels=0.6,
             stroked=True, get_radius="radio", pickable=True, auto_highlight=True,
         )
         st.pydeck_chart(pdk.Deck(
@@ -666,16 +748,44 @@ with tab_hidroquimica:
             valores = pd.to_numeric(con_parametro[parametro_sel], errors="coerce").dropna()
             if not valores.empty:
                 fig, ax = plt.subplots(figsize=(7, 3.2))
+                fig.patch.set_alpha(0.0)
+                ax.set_facecolor("none")
                 sns.histplot(valores, bins=20, color="#984ea3", edgecolor="black", ax=ax)
+
+                if parametro_sel == "pH":
+                    for limite in UMBRAL_PH:
+                        ax.axvline(
+                            limite, color="#EF4444", linestyle="--", linewidth=1.5,
+                            label="Rango normativo (6.5–8.5)" if limite == UMBRAL_PH[0] else None,
+                        )
+                    ax.legend(fontsize=8)
+                elif parametro_sel in UMBRALES_NORMATIVOS:
+                    umbral = UMBRALES_NORMATIVOS[parametro_sel]
+                    ax.axvline(
+                        umbral, color="#EF4444", linestyle="--", linewidth=1.5,
+                        label=f"Límite normativo ({umbral:g})",
+                    )
+                    ax.legend(fontsize=8)
+
                 ax.set_title(f"Distribución de {parametro_sel} (todos los pozos con dato)", fontweight="bold")
                 ax.set_xlabel(_limpiar_texto(parametro_sel))
                 ax.set_ylabel("Cantidad de mediciones")
                 _estilizar_ejes(ax)
+                ax.grid(False)
                 plt.tight_layout()
-                st.pyplot(fig)
+                st.pyplot(fig, transparent=True)
+
+                if parametro_sel in UMBRALES_NORMATIVOS or parametro_sel == "pH":
+                    st.caption(
+                        "Línea roja punteada: límite/rango de referencia para agua de consumo "
+                        "(Decreto 253/79 y normativa UNIT vigente en Uruguay)."
+                    )
 
     with st.expander("Ver tabla cruda de Hidroquímica"):
-        st.dataframe(_para_mostrar(hidroquimica_cruda), use_container_width=True)
+        hidroquimica_mostrar = hidroquimica_cruda.copy()
+        columnas_numericas_hq = hidroquimica_mostrar.select_dtypes(include="number").columns
+        hidroquimica_mostrar[columnas_numericas_hq] = hidroquimica_mostrar[columnas_numericas_hq].round(2)
+        st.dataframe(_para_mostrar(hidroquimica_mostrar), use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # Tab 4 — Hidráulica: profundidad, niveles y caudal
@@ -687,15 +797,6 @@ with tab_hidraulica:
         "estático (NE), nivel dinámico (ND) y caudal de explotación. "
         "*Nota: \"Volumen anual\" y \"Criterio\" no están cargados en la base actual — "
         "si me pasás esos datos los sumamos.*"
-    )
-
-    hidraulica_cruda = datos["hidraulica"].copy()
-    hidraulica_cruda["NE_m"] = pd.to_numeric(hidraulica_cruda["NE_m"], errors="coerce")
-    hidraulica_cruda["ND-m"] = pd.to_numeric(hidraulica_cruda["ND-m"], errors="coerce")
-    hidraulica_ultima = (
-        hidraulica_cruda.sort_values("Año", ascending=False)
-        .groupby("Cod UK", as_index=False)
-        .first()
     )
 
     cod_uk_con_hidraulica = set(hidraulica_ultima["Cod UK"].unique())
@@ -728,7 +829,7 @@ with tab_hidraulica:
             capa_hid = pdk.Layer(
                 "ScatterplotLayer", data=mapa_hid,
                 get_position=["lon", "lat"], get_fill_color="color",
-                get_line_color=[0, 0, 0], line_width_min_pixels=1,
+                get_line_color=[0, 0, 0, 180], line_width_min_pixels=0.6,
                 stroked=True, get_radius="radio", pickable=True, auto_highlight=True,
             )
             st.pydeck_chart(pdk.Deck(
@@ -814,7 +915,7 @@ with tab_dj:
         capa_dj = pdk.Layer(
             "ScatterplotLayer", data=mapa_dj,
             get_position=["lon", "lat"], get_fill_color="color",
-            get_line_color=[0, 0, 0], line_width_min_pixels=1,
+            get_line_color=[0, 0, 0, 180], line_width_min_pixels=0.6,
             stroked=True, get_radius=800, pickable=True, auto_highlight=True,
         )
         st.pydeck_chart(pdk.Deck(
