@@ -32,7 +32,6 @@ import cleaning as cl  # noqa: E402
 import data_loading as dl  # noqa: E402
 import eda  # noqa: E402
 import geo_utils as gu  # noqa: E402
-import piper as piper_mod  # noqa: E402
 import series_temporales as serie_mod  # noqa: E402
 
 st.set_page_config(page_title="Pozos - Raigón / Guaraní", page_icon="💧", layout="wide")
@@ -204,7 +203,7 @@ def _para_mostrar(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     for col in df.select_dtypes(include="object").columns:
-        df[col] = df[col].astype(str).replace("nan", "")
+        df[col] = df[col].astype(str).replace({"nan": "", "None": "", "NaT": ""})
     return df
 
 
@@ -218,8 +217,11 @@ st.markdown(
 )
 st.markdown("---")
 
-tab_resumen, tab_litologia, tab_hidroquimica, tab_piper = st.tabs(
-    ["📋 Resumen general", "🪨 Litología interactiva", "🧪 Hidroquímica interactiva", "💠 Piper"]
+tab_resumen, tab_litologia, tab_hidroquimica, tab_hidraulica, tab_dj = st.tabs(
+    [
+        "📋 Resumen general", "🪨 Litología interactiva", "🧪 Hidroquímica interactiva",
+        "💧 Hidráulica", "📝 Declaraciones Juradas",
+    ]
 )
 
 with tab_resumen:
@@ -576,7 +578,7 @@ with tab_litologia:
             cmap_formaciones = plt.get_cmap("tab20", max(len(formaciones_todas), 1))
             color_formacion = {f: cmap_formaciones(i) for i, f in enumerate(formaciones_todas)}
 
-            fig, ax = plt.subplots(figsize=(4, 6.5))
+            fig, ax = plt.subplots(figsize=(6, 6.5))
             formaciones_vistas = set()
             for _, capa_geo in perfil.iterrows():
                 formacion = capa_geo["Formacion"] if pd.notna(capa_geo["Formacion"]) else "Sin dato"
@@ -592,13 +594,13 @@ with tab_litologia:
             ax.set_xlim(-0.5, 0.5)
             ax.set_xticks([])
             ax.set_ylabel("Profundidad (m)")
-            ax.set_title(f"Columna litológica — {pozo_lito_sel}", fontweight="bold")
-            ax.legend(title="Formación", fontsize=8, loc="upper left", bbox_to_anchor=(1.02, 1))
+            ax.set_title(f"Columna litológica — {pozo_lito_sel}", fontweight="bold", pad=14)
+            ax.legend(title="Formación", fontsize=8, loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
             sns.despine(ax=ax, bottom=True)
             ax.spines["left"].set_color("black")
             ax.minorticks_on()
             ax.tick_params(axis="y", which="both", color="black")
-            plt.tight_layout()
+            fig.subplots_adjust(right=0.62, top=0.90)
             st.pyplot(fig)
 
         with st.expander("Ver detalle de capas de este pozo"):
@@ -676,55 +678,174 @@ with tab_hidroquimica:
         st.dataframe(_para_mostrar(hidroquimica_cruda), use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Tab 4 — Diagrama de Piper (clasificación hidroquímica)
+# Tab 4 — Hidráulica: profundidad, niveles y caudal
 # ---------------------------------------------------------------------------
-with tab_piper:
-    st.header("💠 Diagrama de Piper — Clasificación hidroquímica")
-
-    piper_datos = piper_mod.agregar_coordenadas(piper_mod.calcular_porcentajes_piper(datos["hidroquimica"]))
-    n_muestras = len(piper_datos)
-    n_pozos_piper = piper_datos["Cod UK"].nunique()
-
+with tab_hidraulica:
+    st.header("💧 Hidráulica — Profundidad, niveles y caudal")
     st.markdown(
-        "Solo entran las muestras que tienen los 7 iones principales medidos en la misma "
-        "toma (Ca²⁺, Mg²⁺, Na⁺, K⁺, Cl⁻, SO₄²⁻ y HCO₃⁻). Actualmente eso se cumple para "
-        f"**{n_pozos_piper} pozos** ({n_muestras} muestras) de toda la base de hidroquímica."
+        "Mapa y ficha de pozos con datos hidráulicos: profundidad total, nivel "
+        "estático (NE), nivel dinámico (ND) y caudal de explotación. "
+        "*Nota: \"Volumen anual\" y \"Criterio\" no están cargados en la base actual — "
+        "si me pasás esos datos los sumamos.*"
     )
 
-    if piper_datos.empty:
-        st.info("No hay muestras con el set completo de iones principales.")
+    hidraulica_cruda = datos["hidraulica"].copy()
+    hidraulica_cruda["NE_m"] = pd.to_numeric(hidraulica_cruda["NE_m"], errors="coerce")
+    hidraulica_cruda["ND-m"] = pd.to_numeric(hidraulica_cruda["ND-m"], errors="coerce")
+    hidraulica_ultima = (
+        hidraulica_cruda.sort_values("Año", ascending=False)
+        .groupby("Cod UK", as_index=False)
+        .first()
+    )
+
+    cod_uk_con_hidraulica = set(hidraulica_ultima["Cod UK"].unique())
+    pozos_hidraulica = pozos_f[
+        pozos_f["Cod UK"].isin(cod_uk_con_hidraulica) & pozos_f["lat"].notna() & pozos_f["lon"].notna()
+    ]
+
+    if pozos_hidraulica.empty:
+        st.info("No hay pozos con datos hidráulicos para el filtro seleccionado.")
     else:
-        piper_datos = piper_datos.merge(pozos[["Cod UK", "acuifero"]], on="Cod UK", how="left")
-        piper_datos["acuifero"] = piper_datos["acuifero"].fillna("Sin clasificar")
-        piper_datos = piper_datos[piper_datos["acuifero"].isin(acuifero_sel)]
+        opciones_hid = sorted(pozos_hidraulica["Cod UK"].unique().tolist())
+        pozo_hid_sel = st.selectbox(
+            "Elegí un pozo con datos hidráulicos", options=opciones_hid, key="pozo_hid_sel"
+        )
 
-        if piper_datos.empty:
-            st.info("No hay muestras con set iónico completo para el/los acuífero(s) seleccionado(s) en el filtro.")
-        else:
-            fig, ax = plt.subplots(figsize=(9, 7))
-            piper_mod.dibujar_esqueleto(ax)
-            for acuifero_nombre, grupo in piper_datos.groupby("acuifero"):
-                color = COLOR_ACUIFERO.get(acuifero_nombre, "#999999")
-                ax.scatter(grupo["x_cationes"], grupo["y_cationes"], color=color,
-                           edgecolor="black", s=45, zorder=5, label=acuifero_nombre)
-                ax.scatter(grupo["x_aniones"], grupo["y_aniones"], color=color,
-                           edgecolor="black", s=45, zorder=5)
-                ax.scatter(grupo["x_diamante"], grupo["y_diamante"], color=color,
-                           edgecolor="black", s=45, zorder=5)
-            ax.legend(title="Acuífero", loc="upper right", fontsize=9, frameon=False)
-            plt.tight_layout()
-            st.pyplot(fig)
-            st.caption(
-                "Cada pozo aparece 3 veces (triángulo de cationes, triángulo de aniones y "
-                "rombo central), siempre con el mismo color según su acuífero."
+        mapa_hid = pozos_hidraulica.rename(
+            columns={"Cod UK": "cod_uk", "acuifero": "acuifero_pozo", "Fuente BD": "fuente_bd"}
+        ).copy()
+        mapa_hid["es_seleccionado"] = mapa_hid["cod_uk"] == pozo_hid_sel
+        mapa_hid["color"] = mapa_hid["es_seleccionado"].apply(
+            lambda sel: [230, 25, 25, 255] if sel else [30, 100, 180, 140]
+        )
+        mapa_hid["radio"] = mapa_hid["es_seleccionado"].apply(lambda sel: 1800 if sel else 700)
+        fila_hid_sel = mapa_hid[mapa_hid["es_seleccionado"]].iloc[0]
+
+        col_mapa_hid, col_ficha = st.columns([1, 1.2])
+
+        with col_mapa_hid:
+            st.markdown("**Pozos con datos hidráulicos**")
+            capa_hid = pdk.Layer(
+                "ScatterplotLayer", data=mapa_hid,
+                get_position=["lon", "lat"], get_fill_color="color",
+                get_line_color=[0, 0, 0], line_width_min_pixels=1,
+                stroked=True, get_radius="radio", pickable=True, auto_highlight=True,
             )
+            st.pydeck_chart(pdk.Deck(
+                layers=[capa_hid],
+                initial_view_state=pdk.ViewState(
+                    latitude=float(fila_hid_sel["lat"]), longitude=float(fila_hid_sel["lon"]), zoom=9,
+                ),
+                map_style=MAPA_ESTILO,
+                tooltip={"text": "Pozo: {cod_uk}\nAcuífero: {acuifero_pozo}\nFuente BD: {fuente_bd}"},
+            ))
+            st.caption("🔴 Pozo seleccionado. 🔵 Resto de los pozos con datos hidráulicos (filtro actual).")
 
-            with st.expander("Ver tabla de porcentajes iónicos (meq%) de estas muestras"):
-                columnas_tabla = [
-                    "Cod UK", "Fecha", "acuifero", "pct_Ca", "pct_Mg", "pct_NaK",
-                    "pct_HCO3", "pct_SO4", "pct_Cl",
-                ]
-                tabla_piper = piper_datos[columnas_tabla].copy()
-                for col in ["pct_Ca", "pct_Mg", "pct_NaK", "pct_HCO3", "pct_SO4", "pct_Cl"]:
-                    tabla_piper[col] = tabla_piper[col].round(1)
-                st.dataframe(_para_mostrar(tabla_piper), use_container_width=True)
+        with col_ficha:
+            fila_h = hidraulica_ultima[hidraulica_ultima["Cod UK"] == pozo_hid_sel].iloc[0]
+            profundidad_total = fila_hid_sel.get("Prof. Total")
+
+            st.markdown(f"**Ficha hidráulica — {pozo_hid_sel}**")
+            m1, m2, m3 = st.columns(3)
+            m1.metric(
+                "Profundidad total",
+                f"{profundidad_total:.1f} m" if pd.notna(profundidad_total) else "s/d",
+            )
+            m2.metric("Nivel estático (NE)", f"{fila_h['NE_m']:.1f} m" if pd.notna(fila_h["NE_m"]) else "s/d")
+            m3.metric("Nivel dinámico (ND)", f"{fila_h['ND-m']:.1f} m" if pd.notna(fila_h["ND-m"]) else "s/d")
+            st.metric("Caudal", f"{fila_h['Caudal']:.1f} m³/h" if pd.notna(fila_h["Caudal"]) else "s/d")
+
+            if pd.notna(profundidad_total):
+                fig, ax = plt.subplots(figsize=(4, 6))
+                ax.bar(0, profundidad_total, width=0.4, color="#d9d9d9", edgecolor="black")
+                if pd.notna(fila_h["NE_m"]):
+                    ax.axhline(fila_h["NE_m"], color="#377eb8", linewidth=2.2, label="NE (nivel estático)")
+                if pd.notna(fila_h["ND-m"]):
+                    ax.axhline(fila_h["ND-m"], color="#e41a1c", linewidth=2.2, label="ND (nivel dinámico)")
+                ax.invert_yaxis()
+                ax.set_xlim(-0.5, 0.5)
+                ax.set_xticks([])
+                ax.set_ylabel("Profundidad (m)")
+                ax.set_title(f"Esquema — {pozo_hid_sel}", fontweight="bold", pad=14)
+                ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
+                sns.despine(ax=ax, bottom=True)
+                ax.spines["left"].set_color("black")
+                fig.subplots_adjust(right=0.55, top=0.90)
+                st.pyplot(fig)
+            else:
+                st.caption("Este pozo no tiene profundidad total cargada para dibujar el esquema.")
+
+        with st.expander("Ver historial hidráulico completo de este pozo"):
+            historial = hidraulica_cruda[hidraulica_cruda["Cod UK"] == pozo_hid_sel].sort_values("Año")
+            st.dataframe(_para_mostrar(historial), use_container_width=True)
+
+    with st.expander("Ver tabla cruda de Hidráulica (todos los pozos)"):
+        st.dataframe(_para_mostrar(hidraulica_cruda), use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Tab 5 — Declaraciones Juradas
+# ---------------------------------------------------------------------------
+with tab_dj:
+    st.header("📝 Pozos con y sin Declaración Jurada")
+    st.markdown(
+        "Se considera que un pozo **tiene declaración jurada** cuando su \"Codigo Fuente\" "
+        "incluye un código SGRH (Sistema de Gestión de Recursos Hídricos), que DINAGUA asigna "
+        "al registrar una declaración jurada. Si tenés otro criterio o columna para esto, avisame."
+    )
+
+    pozos_dj = pozos_f[pozos_f["lat"].notna() & pozos_f["lon"].notna()].copy()
+    pozos_dj["tiene_dj"] = pozos_dj["codigo_sgrh"].notna()
+
+    con_dj = int(pozos_dj["tiene_dj"].sum())
+    sin_dj = len(pozos_dj) - con_dj
+    m1, m2 = st.columns(2)
+    m1.metric("Con declaración jurada (SGRH)", f"{con_dj:,}")
+    m2.metric("Sin declaración jurada", f"{sin_dj:,}")
+
+    if pozos_dj.empty:
+        st.info("No hay pozos con coordenadas para el filtro seleccionado.")
+    else:
+        mapa_dj = pozos_dj.rename(
+            columns={"Cod UK": "cod_uk", "acuifero": "acuifero_pozo", "Fuente BD": "fuente_bd"}
+        ).copy()
+        mapa_dj["color"] = mapa_dj["tiene_dj"].apply(
+            lambda tiene: [50, 160, 50, 220] if tiene else [220, 120, 20, 180]
+        )
+        capa_dj = pdk.Layer(
+            "ScatterplotLayer", data=mapa_dj,
+            get_position=["lon", "lat"], get_fill_color="color",
+            get_line_color=[0, 0, 0], line_width_min_pixels=1,
+            stroked=True, get_radius=800, pickable=True, auto_highlight=True,
+        )
+        st.pydeck_chart(pdk.Deck(
+            layers=[capa_dj],
+            initial_view_state=pdk.ViewState(
+                latitude=float(mapa_dj["lat"].mean()), longitude=float(mapa_dj["lon"].mean()), zoom=6.5,
+            ),
+            map_style=MAPA_ESTILO,
+            tooltip={"text": "Pozo: {cod_uk}\nAcuífero: {acuifero_pozo}\nFuente BD: {fuente_bd}"},
+        ))
+        st.caption("🟢 Con declaración jurada (código SGRH). 🟠 Sin declaración jurada.")
+
+        resumen_dj = (
+            pozos_dj.groupby(["acuifero", "tiene_dj"], dropna=False)
+            .size()
+            .reset_index(name="cantidad_pozos")
+        )
+        resumen_dj["Declaración jurada"] = resumen_dj["tiene_dj"].map({True: "Con DJ", False: "Sin DJ"})
+        fig, ax = plt.subplots(figsize=(7, 4))
+        sns.barplot(
+            data=resumen_dj, x="acuifero", y="cantidad_pozos", hue="Declaración jurada",
+            palette={"Con DJ": "#4daf4a", "Sin DJ": "#ff7f00"}, ax=ax,
+        )
+        ax.set_title("Pozos con/sin declaración jurada, por acuífero", fontweight="bold")
+        ax.set_xlabel("")
+        ax.set_ylabel("Cantidad de pozos")
+        ax.legend(title="", fontsize=9)
+        _estilizar_ejes(ax)
+        plt.tight_layout()
+        st.pyplot(fig)
+
+    with st.expander("Ver tabla completa"):
+        columnas_dj = ["Cod UK", "acuifero", "Fuente BD", "Codigo Fuente", "codigo_sgrh", "tiene_dj"]
+        st.dataframe(_para_mostrar(pozos_dj[columnas_dj]), use_container_width=True)
